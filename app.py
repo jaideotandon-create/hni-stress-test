@@ -1,11 +1,54 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
+import plotly.graph_objects as go
 
-st.set_page_config(page_title="HNI Portfolio Stress Test", layout="wide")
-st.title("HNI Portfolio Stress Test")
-st.caption("Educational tool. Historical shocks are rough approximations of "
-           "Indian-investor (INR) returns; check and edit them before professional use.")
+st.set_page_config(page_title="HNI Portfolio Stress Test", page_icon="🛡️", layout="wide")
+
+# ---------- Look and feel ----------
+INK = "#0F2A3D"      # deep navy for text and totals
+BRASS = "#B08D57"    # private-bank accent
+LOSS = "#B23A3A"     # losses
+GAIN = "#2E7D5B"     # gains
+MUTED = "#6B7785"
+GRID = "#E3E6EB"
+
+st.markdown(f"""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+html, body, p, label, li, .stMarkdown, [data-testid="stMetricLabel"] {{
+    font-family: 'IBM Plex Sans', sans-serif;
+}}
+h1, h2, h3 {{ font-family: 'DM Serif Display', serif !important; color: {INK}; font-weight: 400 !important; }}
+h1 {{ font-size: 2.6rem !important; letter-spacing: -0.01em; }}
+.block-container {{ padding-top: 2.5rem; max-width: 1250px; }}
+
+.hero {{ border-top: 3px solid {BRASS}; padding: 1.4rem 0 1.6rem 0; margin-bottom: 0.5rem; }}
+.hero-label {{ color: {MUTED}; font-size: 0.95rem; }}
+.hero-figure {{ font-family: 'DM Serif Display', serif; font-size: 3.4rem; color: {INK}; line-height: 1.1; margin: 0.3rem 0; }}
+.hero-figure .loss {{ color: {LOSS}; }}
+.hero-sub {{ color: {INK}; font-size: 1.05rem; }}
+
+[data-testid="stMetric"] {{
+    background: #FFFFFF; border: 1px solid {GRID}; border-left: 4px solid {BRASS};
+    padding: 14px 18px; border-radius: 6px;
+}}
+[data-testid="stMetricValue"] {{ font-family: 'DM Serif Display', serif; color: {INK}; }}
+.stTabs [data-baseweb="tab"] {{ font-size: 1rem; }}
+</style>
+""", unsafe_allow_html=True)
+
+
+def style_fig(fig, height=420):
+    fig.update_layout(
+        height=height, margin=dict(l=10, r=10, t=50, b=10),
+        font=dict(family="IBM Plex Sans, sans-serif", color=INK, size=13),
+        title_font=dict(family="DM Serif Display, serif", size=20, color=INK),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", showlegend=False,
+    )
+    fig.update_yaxes(gridcolor=GRID, zerolinecolor="#C9CED6")
+    fig.update_xaxes(showgrid=False)
+    return fig
+
 
 # ---------- Asset classes ----------
 ASSETS = [
@@ -24,7 +67,8 @@ LIQUID = ["Large Cap Equity", "Mid & Small Cap Equity", "Debt Funds / Bonds",
 PLEDGEABLE = ["Large Cap Equity", "Mid & Small Cap Equity"]
 
 # ---------- Sidebar: client inputs ----------
-st.sidebar.header("Client portfolio (₹ crore)")
+st.sidebar.header("Client portfolio")
+st.sidebar.caption("Amounts in ₹ crore")
 holdings = {}
 for asset, default in zip(ASSETS, DEFAULTS):
     holdings[asset] = st.sidebar.number_input(asset, min_value=0.0, value=default, step=0.5)
@@ -36,6 +80,11 @@ loan = st.sidebar.number_input("Loan against shares (₹ crore)", min_value=0.0,
 max_ltv = st.sidebar.slider("Maximum loan-to-value allowed on pledged equity (%)", 10, 80, 50)
 
 total = sum(holdings.values())
+
+st.title("HNI Portfolio Stress Test")
+st.caption("Educational tool. Historical shocks are rough approximations of "
+           "Indian-investor (INR) returns; check and edit them before professional use.")
+
 if total == 0:
     st.warning("Enter at least one holding in the sidebar to run a stress test.")
     st.stop()
@@ -81,6 +130,23 @@ def stress(shocks):
     return pd.DataFrame(rows)
 
 
+# ---------- Hero: worst historical case ----------
+worst_name, worst_change = None, 0.0
+for name, shocks in HISTORICAL.items():
+    change = stress(shocks)["P&L (₹ Cr)"].sum()
+    if worst_name is None or change < worst_change:
+        worst_name, worst_change = name, change
+worst_after = total + worst_change
+
+st.markdown(f"""
+<div class="hero">
+  <div class="hero-label">Worst historical case for this portfolio: {worst_name}</div>
+  <div class="hero-figure">₹{total:,.2f} Cr to <span class="loss">₹{worst_after:,.2f} Cr</span></div>
+  <div class="hero-sub">A fall of {abs(worst_change) / total * 100:.1f}%, or ₹{abs(worst_change):,.2f} Cr of client wealth.</div>
+</div>
+""", unsafe_allow_html=True)
+
+
 def show_results(df, key):
     before = df["Value before (₹ Cr)"].sum()
     after = df["Value after (₹ Cr)"].sum()
@@ -112,11 +178,24 @@ def show_results(df, key):
         st.info(f"Money that can be raised within about a week after the shock: "
                 f"₹{liquid:,.2f} Cr ({liquid / after * 100:.0f}% of the portfolio).")
 
-    fig = px.bar(df, x="Asset class", y="P&L (₹ Cr)", color="P&L (₹ Cr)",
-                 color_continuous_scale="RdYlGn", color_continuous_midpoint=0,
-                 title="Gain / loss by asset class")
-    st.plotly_chart(fig, key=key)
-    st.dataframe(df.round(2), hide_index=True)
+    # Waterfall: how the portfolio walks from before to after
+    moves = df[df["P&L (₹ Cr)"] != 0]
+    fig = go.Figure(go.Waterfall(
+        measure=["absolute"] + ["relative"] * len(moves) + ["total"],
+        x=["Before"] + list(moves["Asset class"]) + ["After"],
+        y=[before] + list(moves["P&L (₹ Cr)"]) + [0],
+        text=[f"₹{before:,.2f}"] + [f"{v:+.2f}" for v in moves["P&L (₹ Cr)"]] + [f"₹{after:,.2f}"],
+        textposition="outside",
+        decreasing={"marker": {"color": LOSS}},
+        increasing={"marker": {"color": GAIN}},
+        totals={"marker": {"color": INK}},
+        connector={"line": {"color": "#C9CED6", "dash": "dot"}},
+    ))
+    fig.update_layout(title="From before to after, asset by asset (₹ Cr)")
+    st.plotly_chart(style_fig(fig, 460), key=key)
+
+    with st.expander("See the detailed table"):
+        st.dataframe(df.round(2), hide_index=True)
 
 
 tab1, tab2, tab3 = st.tabs(["Historical scenarios", "Build your own shock", "Compare all scenarios"])
@@ -160,13 +239,18 @@ with tab3:
     all_scenarios["Your custom shock"] = hypothetical
     summary = []
     for name, shocks in all_scenarios.items():
-        df = stress(shocks)
-        change = df["P&L (₹ Cr)"].sum()
+        change = stress(shocks)["P&L (₹ Cr)"].sum()
         summary.append({"Scenario": name, "Gain / loss (₹ Cr)": round(change, 2),
                         "Change (%)": round(change / total * 100, 1)})
-    summary_df = pd.DataFrame(summary).sort_values("Change (%)")
-    fig = px.bar(summary_df, x="Change (%)", y="Scenario", orientation="h",
-                 color="Change (%)", color_continuous_scale="RdYlGn",
-                 color_continuous_midpoint=0, title="Portfolio impact across scenarios")
-    st.plotly_chart(fig, key="compare")
-    st.dataframe(summary_df, hide_index=True)
+    summary_df = pd.DataFrame(summary).sort_values("Change (%)", ascending=False)
+
+    fig = go.Figure(go.Bar(
+        x=summary_df["Change (%)"], y=summary_df["Scenario"], orientation="h",
+        marker_color=[LOSS if v < 0 else GAIN for v in summary_df["Change (%)"]],
+        text=[f"{v:+.1f}%" for v in summary_df["Change (%)"]], textposition="outside",
+    ))
+    fig.update_layout(title="Which crisis hurts this client most")
+    fig.update_xaxes(title="Portfolio change (%)", gridcolor=GRID, showgrid=True)
+    fig.update_yaxes(showgrid=False)
+    st.plotly_chart(style_fig(fig, 420), key="compare")
+    st.dataframe(summary_df.iloc[::-1], hide_index=True)
